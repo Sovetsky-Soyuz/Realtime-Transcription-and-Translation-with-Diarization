@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import threading
+import time
 import traceback
 import wave
 
@@ -28,8 +29,8 @@ def log(msg: str):
     print(f"[pipeline] {msg}", file=sys.stderr, flush=True)
 
 
-def emit_json(data: dict):
-    print(json.dumps(data, ensure_ascii=False), flush=True)
+def emit_json(data: dict, indent: int | None = None):
+    print(json.dumps(data, ensure_ascii=False, indent=indent), flush=True)
 
 
 def store_error(error_state: dict, source: str, exc: BaseException):
@@ -95,9 +96,11 @@ def main():
                 "type": "result",
                 "original": orig,
                 "translated": trans,
-                "language": lang,
+                "src_language": lang,
+                "target_language": args.target_lang,
                 "timing": timing,
-            }
+            },
+            indent=3,
         )
 
     pipeline = LocalPipeline(
@@ -294,11 +297,20 @@ def main():
                 import sounddevice as sd
 
                 log("Listening from Microphone... (Ctrl+C to stop)")
+                micro_status_log = {"message": None, "time": 0.0}
 
                 def callback(indata, frames, time_info, status):
                     try:
                         if status:
-                            log(f"[micro-callback] {status}")
+                            message = f"[micro-callback] {status}"
+                            now = time.monotonic()
+                            if (
+                                message != micro_status_log["message"]
+                                or (now - micro_status_log["time"]) >= 1.0
+                            ):
+                                log(message)
+                                micro_status_log["message"] = message
+                                micro_status_log["time"] = now
                         enqueue_audio_chunk(indata, "micro-callback")
                     except Exception as exc:
                         store_error(error_state, "micro-callback", exc)
@@ -307,6 +319,7 @@ def main():
                     samplerate=pipeline.sample_rate,
                     channels=1,
                     dtype=np.float32,
+                    blocksize=int(pipeline.sample_rate * 0.3),
                     callback=callback,
                 )
                 stream.start()

@@ -390,6 +390,7 @@ def run_gui(args):
         sig_status             = Signal(str)
         sig_original_commit = Signal(str)
         sig_stable_live = Signal(str, str)
+        sig_fatal_error = Signal(str)
 
         def __init__(self, init_args):
             super().__init__()
@@ -427,7 +428,8 @@ def run_gui(args):
             self.sig_draft_translation.connect(self._on_draft_translation)
             self.sig_status.connect(self._set_status)
             self.sig_original_commit.connect(lambda t: self.p_orig.commit(t))
-            self.sig_stable_live.connect(self._on_stable_live)  
+            self.sig_stable_live.connect(self._on_stable_live)
+            self.sig_fatal_error.connect(self._on_fatal_error)
 
             # ── Session transcript log ────────────────────────────────
             self._session_start  = datetime.now()
@@ -839,7 +841,7 @@ def run_gui(args):
                 self._dot.setStyleSheet(
                     f"QLabel{{color:{MUTED};font-size:10px;}}")
                 self.waveform.stop()
-                self._set_status(f"Error: {e}")
+                self._stop_recording(status_message=f"Error: {e}")
 
         def _start_wasapi(self):
             self._pyaudio = pyaudio.PyAudio()
@@ -858,7 +860,7 @@ def run_gui(args):
                 stream_callback=self._cb_wasapi)
             self._stream.start_stream()
 
-        def _stop_recording(self):
+        def _stop_recording(self, status_message: str = "Stopped."):
             if self._pipeline:
                 self._pipeline.stop_session()
             self._recording = False  # draft_worker will exit by itself because of check _recording
@@ -875,16 +877,25 @@ def run_gui(args):
                         self._stream.close()
                     else:
                         self._stream.stop_stream(); self._stream.close()
-                        self._pyaudio.terminate()
+                        if self._pyaudio:
+                            self._pyaudio.terminate()
+                            self._pyaudio = None
                     self._stream = None
             except Exception as e:
                 print(f"[stop] {e}")
             # Wait for threads to stop — timeout short, do not block long
+            try:
+                if self._pyaudio:
+                    self._pyaudio.terminate()
+                    self._pyaudio = None
+            except Exception as e:
+                print(f"[stop] {e}")
+            current = threading.current_thread()
             for t in [self._proc_thread, self._draft_thread, self._whisper_thread]:
-                if t and t.is_alive():
+                if t and t is not current and t.is_alive():
                     t.join(timeout=1.5)
             self._save_transcript()
-            self._set_status("Stopped.")
+            self._set_status(status_message)
             self._stable_buf.reset()
 
         # ── Audio callbacks ───────────────────
@@ -937,10 +948,10 @@ def run_gui(args):
             MAX_UTTERANCE_S   = 12
             MIN_COMMIT_CHARS  = 8
             SILENCE_AFTER_S   = 1.2
-            PREVIEW_BUF_S     = 4.0
 
             p  = self._pipeline
             sr = 16000
+            max_buf_samples = int(MAX_UTTERANCE_S * sr)
 
             buf              = np.array([], dtype=np.float32)
             utterance_start  = time.time()
@@ -948,7 +959,6 @@ def run_gui(args):
             last_preview     = time.time()   
             last_speculative = time.time()
             last_live_text   = ""
-            committed_text   = ""
             last_spec_text   = ""
 
             buf_start_diart  = 0.0
@@ -959,38 +969,44 @@ def run_gui(args):
             self._stable_buf.reset()
             self._whisper_result = ("", "")
 
+            def append_chunk(chunk: np.ndarray, push_to_diarization: bool = True):
+                nonlocal buf, buf_start_diart, last_speech_t
+
+                chunk = chunk.astype(np.float32, copy=False)
+                if chunk.size == 0:
+                    return
+
+                if push_to_diarization:
+                    p._push_audio_to_diarization(chunk)
+
+                buf = np.concatenate([buf, chunk])
+                if len(buf) > max_buf_samples:
+                    dropped = len(buf) - max_buf_samples
+                    buf = buf[-max_buf_samples:]
+                    buf_start_diart += dropped / sr
+
+                if np.sqrt(np.mean(chunk ** 2)) > 0.005:
+                    last_speech_t = time.time()
+
             while self._recording:
                 async_error = p.pop_async_error()
                 if async_error is not None:
-                    self.sig_status.emit(f"Error: {async_error['message']}")
+                    self.sig_fatal_error.emit(async_error["message"])
+                    break
                 # ── Drain audio queue ────────────────────────────────
                 for _ in range(12):
                     try:
                         c = self._audio_q.get_nowait()
-                        chunk = c.astype(np.float32)
-                        buf = np.concatenate([buf, chunk])
-                        if len(buf) > int(MAX_UTTERANCE_S * sr):
-                            buf = buf[-int(MAX_UTTERANCE_S * sr):]
-                        # update VAD based on RMS
-                        if np.sqrt(np.mean(chunk ** 2)) > 0.005:
-                            last_speech_t = time.time()
+                        append_chunk(c, push_to_diarization=True)
                     except queue.Empty:
                         break
                 try:
                     c = self._audio_q.get(timeout=0.08)
-                    chunk = c.astype(np.float32)
-                    buf = np.concatenate([buf, chunk])
-
-                    p._push_audio_to_diarization(chunk)
-
-                    if np.sqrt(np.mean(chunk ** 2)) > 0.005:  
-                        last_speech_t = time.time()  
+                    append_chunk(c, push_to_diarization=True)
                 except queue.Empty:
                     pass
 
                 now = time.time()
-                if len(buf) > int(MAX_UTTERANCE_S * sr):
-                    buf = buf[-int(MAX_UTTERANCE_S * sr):]
                 if len(buf) < sr * 0.4:
                     continue
 
@@ -1071,69 +1087,8 @@ def run_gui(args):
                                 pass
 
                         if full_text and len(full_text) >= MIN_COMMIT_CHARS:
-                            new_part = full_text
-
-
-                            if committed_text:
-                                import re
-                                import difflib
-
-                                def words_match(w1, w2):
-                                 
-                                    if w1 == w2: return True
-
-                                    if len(w1) >= 4 and len(w2) >= 4:
-                                        if w1 + 's' == w2 or w2 + 's' == w1: return True
-                                        if w1 + 'd' == w2 or w2 + 'd' == w1: return True
-                                        
-                                        return difflib.SequenceMatcher(None, w1, w2).ratio() > 0.85
-                                    return False
-
-                                ow = committed_text.split()[-15:]
-                                nw = full_text.split()[:15]
-
-                                # ow_norm = [re.sub(r'[^\w]', '', w.lower()) for w in ow]
-                                # nw_norm = [re.sub(r'[^\w]', '', w.lower()) for w in nw]
-
-                                ow_norm = [re.sub(r'\[speaker\d+\]|[^\w]', '', w.lower()) for w in ow]
-                                nw_norm = [re.sub(r'\[speaker\d+\]|[^\w]', '', w.lower()) for w in nw]
-
-                                ow_norm = [w for w in ow_norm if w]
-                                nw_norm = [w for w in nw_norm if w]
-
-                                overlap = 0
-                                found = False
-                                
-                                for i in range(min(len(ow_norm), len(nw_norm)), 0, -1):
-                                    suffix = ow_norm[-i:]
-                                    
-                                    for shift in range(3):
-                                        if shift + i <= len(nw_norm):
-                                            prefix = nw_norm[shift : shift+i]
-
-                                            if all(words_match(s, p) for s, p in zip(suffix, prefix)):
-                                                overlap = shift + i
-                                                found = True
-                                                break
-                                    if found:
-                                        break
-                                
-                                if overlap > 0:
-                                    # new_part = " ".join(full_text.split()[overlap:])
-
-                                    words_original = full_text.split()
-                                    valid_words_count = 0
-                                    cut_index = 0
-                                    for idx, w in enumerate(words_original):
-                                        if not re.match(r'\[speaker\d+\]', w):
-                                            valid_words_count += 1
-                                        if valid_words_count == overlap:
-                                            cut_index = idx + 1
-                                            break
-                                            
-                                    new_part = " ".join(words_original[cut_index:])
-
-                                
+                            new_part = p._trim_committed_overlap(full_text)
+                            p.prev_text = full_text
 
                             if new_part and len(new_part) >= MIN_COMMIT_CHARS:
 
@@ -1152,10 +1107,9 @@ def run_gui(args):
                                         self._draft_q.get_nowait()
                                     except queue.Empty:
                                         break
-
+                                
                                 # 2. QUEUE THE TRANSLATION FOR LLM
                                 self._queue_translation(p, full_text_spk, now, None)
-                                committed_text = full_text
 
                     # 3. RESET THE WHOLE MEMORY TO PREPARE FOR THE NEXT SENTENCE
                     buf = next_buf
@@ -1167,7 +1121,6 @@ def run_gui(args):
                     last_speech_t    = now
                     last_preview     = now
                     last_live_text   = ""
-                    committed_text   = ""
                     last_spec_text   = ""
                     last_speculative = now
                     self._stable_buf.reset()
@@ -1242,6 +1195,13 @@ def run_gui(args):
             # Get the current speaker tag from the pipeline
             spk_tag = self._pipeline.current_speaker or DEFAULT_SPEAKER
             self.p_orig.set_live_stable(confirmed, provisional, speaker=spk_tag)
+
+        def _on_fatal_error(self, message: str):
+            status_message = f"Error: {message}"
+            if self._recording:
+                self._stop_recording(status_message=status_message)
+            else:
+                self._set_status(status_message)
 
         def _on_result(self, orig: str, trans: str, lang: str, timing: dict):
             """Tier 3: LLM finished → commit, log entry."""

@@ -1,6 +1,6 @@
 # Real-time STT, Translation, and Speaker Diarization
 
-This project is a local Windows speech pipeline that combines Faster-Whisper for speech-to-text, Hugging Face or GGUF LLMs for translation, and Diart / Pyannote for speaker diarization. It supports a desktop GUI overlay, a CLI stdin mode, and a WAV test mode from the same shared pipeline.
+This project is a local Windows speech pipeline that combines Faster-Whisper for speech-to-text, Hugging Face or GGUF LLMs for translation, and Diart / Pyannote for speaker diarization. It supports a desktop GUI overlay, a headless CLI mode (`--no-gui`) for microphone or WASAPI capture, and a WAV-based `--test` mode through the same shared pipeline.
 
 ## Key Features
 
@@ -9,9 +9,8 @@ This project is a local Windows speech pipeline that combines Faster-Whisper for
 - Speaker diarization integrated into GUI, CLI, and test mode
 - GUI overlay with live transcription, speculative translation, transcript history, and save/export helpers
 - Windows microphone input and WASAPI loopback capture
-- CLI stdin mode for piping 16 kHz mono PCM into the pipeline
+- Headless CLI mode with JSON output events
 - Offline `--test` mode for repeatable WAV validation
-- Backward-compatible launchers: `test2.py` and `ars_with_diart.py`
 
 ## Project Layout
 
@@ -92,12 +91,12 @@ They require CUDA-specific or custom package sources that should not be hidden i
 
 ## Environment Variables
 
-Create a `.env` file in this folder if you need to provide a Hugging Face token for Diart / Pyannote downloads:
+Create a `.env` file in this folder if you want to provide a Hugging Face token for Diart / Pyannote downloads, a default LLM path / repo ID, or a speaker limit:
 
 ```env
 HF_TOKEN=your_huggingface_token_here
-MODEL = your_translate_model_here
-MAX_SPEAKERS = number_of_speaker
+MODEL=your_translate_model_here
+MAX_SPEAKERS=4
 ```
 
 ## Usage
@@ -110,9 +109,17 @@ Launch the full overlay UI:
 python main.py
 ```
 
+You can choose some params such as:
+
+- Whisper Model
+- LLM (for translation)
+- Micro or WASAPI
+
+When end the system, the result will be save as Markdown file. You can open it by press the icon "📁" in the GUI.
+
 ### CLI mode
 
-Run the shared pipeline without the GUI and capture audio directly from your Microphone or System Audio (WASAPI):
+Run the shared pipeline without the GUI and capture audio directly from your microphone or system audio (WASAPI):
 
 ```powershell
 # Get sound from the Microphone (default)
@@ -124,20 +131,42 @@ python main.py --no-gui --audio-src wasapi
 python main.py --no-gui --audio-src wasapi --source-lang en --target-lang vi --whisper-model large-v3-turbo
 ```
 
-CLI JSON results now include speaker-tagged `original` and `translated` fields, for example:
+Non-GUI mode writes JSON events to stdout. The event stream can include `status`, `ready`, `result`, `error`, and `done`.
+
+`result` messages include the diarized `original` transcript and the translated output, for example:
 
 ```json
-{"type":"result","original":"[speaker0] hello","translated":"[speaker0] xin chao","language":"en","timing":{"asr":0.42,"translate":0.31,"total":0.73}}
+{
+  "type": "result",
+  "original": "[speaker0] Good morning...",
+  "translated": "[speaker0] Chào buổi sáng...",
+  "src_language": "en",
+  "target_language": "vi",
+  "timing": {"asr": 1.23, "translate": 0.52, "total": 1.75}
+}
 ```
 
 ### Test mode
 
-Process a WAV file through the same non-GUI pipeline:
+Process a WAV file through the same non-GUI pipeline. WAV input is decoded, downmixed if needed, and resampled to 16 kHz internally before utterance processing:
 
 ```powershell
 python main.py --test --test-file test.wav
 python main.py --test --test-file sample.wav --source-lang ja --target-lang en
 python main.py --test --test-file sample.wav --llm-model Qwen/Qwen2.5-1.5B-Instruct
+```
+
+Example `result` output in Test mode:
+
+```json
+{
+   "type": "result",
+   "original": "[speaker0] Good morning, I'm John, the Marketing Manager here at TechSolutions. Thanks for coming in today.",
+   "translated": "[speaker0] Chao buoi sang, toi la John, quan ly marketing tai TechSolutions. Cam on quy vi da den tham du.",
+   "src_language": "en",
+   "target_language": "vi",
+   "timing": {"asr": 1.23, "translate": 0.52, "total": 1.75}
+}
 ```
 
 ### Common options
@@ -170,19 +199,19 @@ You can customize the pipeline's behavior using the following command-line argum
 
 ### AI Models & Hardware
 
-| Argument            | Description                                                                                                                   | Default                  |
-| :------------------ | :---------------------------------------------------------------------------------------------------------------------------- | :----------------------- |
-| `--whisper-model` | Faster-Whisper model size. Choices:`tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`, `large-v3-turbo`. | `large-v3-turbo`       |
-| `--llm-model`     | Path or Hugging Face repo ID for the translation LLM (e.g.,`Qwen/Qwen2.5-1.5B-Instruct` or a local `.gguf` file).         | `""` (Fallback to ENV) |
-| `--device`        | Hardware device for inference. Choices:`cuda`, `cpu`.                                                                     | `cuda`                 |
-| `--compute-type`  | Model quantization format to save VRAM (e.g.,`float16`, `int8`, `int8_float16`).                                        | `float16`              |
+| Argument            | Description                                                                                                                   | Default                          |
+| :------------------ | :---------------------------------------------------------------------------------------------------------------------------- | :------------------------------- |
+| `--whisper-model` | Faster-Whisper model size. Choices:`tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`, `large-v3-turbo`. | `large-v3-turbo`               |
+| `--llm-model`     | Path or Hugging Face repo ID for the translation LLM (e.g.,`Qwen/Qwen2.5-1.5B-Instruct` or a local `.gguf` file).         | `MODEL` env value, else `""` |
+| `--device`        | Hardware device for inference. Choices:`cuda`, `cpu`.                                                                     | `cuda`                         |
+| `--compute-type`  | Whisper compute type. Choices:`float16`, `int8`, `float32`.                                                             | `float16`                      |
 
 ### Pipeline Tuning (Advanced)
 
-| Argument             | Description                                                        | Default |
-| :------------------- | :----------------------------------------------------------------- | :------ |
-| `--chunk-seconds`  | The duration (in seconds) of audio chunks sent to Whisper.         | `4`   |
-| `--stride-seconds` | The sliding window step (in seconds) for continuous transcription. | `3`   |
+| Argument             | Description                                             | Default |
+| :------------------- | :------------------------------------------------------ | :------ |
+| `--chunk-seconds`  | Chunk-length tuning value used by the shared pipeline.  | `7`   |
+| `--stride-seconds` | Stride-length tuning value used by the shared pipeline. | `5`   |
 
 *Tip: You can always run `python main.py --help` in your terminal to see this list dynamically.*
 
@@ -192,7 +221,6 @@ When `pyaudiowpatch` is installed, the GUI can capture system audio with WASAPI 
 
 ## Notes
 
-- `main.py` is the only real entrypoint after the refactor.
-- `test2.py` and `ars_with_diart.py` now exist only as compatibility launchers.
+- This README documents the current `main.py` entrypoint and its public flags.
 - The GUI keeps its existing speaker-tag behavior for committed original text.
-- CLI and `--test` mode now deterministically prefix both result fields with speaker IDs such as `SPEAKER_00`.
+- CLI and `--test` mode emit diarized original text such as `[speaker0] ...`, and the translated field is speaker-prefixed in non-GUI mode when translation text is returned.

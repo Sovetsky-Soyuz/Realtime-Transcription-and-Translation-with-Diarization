@@ -137,6 +137,9 @@ class LocalPipeline:
         self._diart_q.join()
         self._trans_q.join()
 
+    def wait_for_diarization(self):
+        self._diart_q.join()
+
     def _clear_async_error(self):
         with self._async_error_lock:
             self._async_error = None
@@ -475,8 +478,7 @@ class LocalPipeline:
             dtype = torch.float16 if self.device == "cuda" else torch.float32
             self.llm_model_obj = AutoModelForCausalLM.from_pretrained(
                 self.llm_model_id,
-                # dtype=dtype,
-                torch_dtype=torch.float16,
+                torch_dtype=dtype,
                 device_map=self.device,
                 trust_remote_code=True,
             ).eval()
