@@ -224,3 +224,4 @@ When `pyaudiowpatch` is installed, the GUI can capture system audio with WASAPI 
 - This README documents the current `main.py` entrypoint and its public flags.
 - The GUI keeps its existing speaker-tag behavior for committed original text.
 - CLI and `--test` mode emit diarized original text such as `[speaker0] ...`, and the translated field is speaker-prefixed in non-GUI mode when translation text is returned.
+- The code is still being updated and bugs are being fixed.
