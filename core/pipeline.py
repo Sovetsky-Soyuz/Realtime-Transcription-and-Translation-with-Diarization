@@ -494,56 +494,6 @@ class LocalPipeline:
 
         self._status(f"LLM loaded ({time.time() - t:.1f}s)")
 
-    # def _trans_worker(self):
-    #     """
-    #     Dedicated LLM translation thread.
-    #     Picks (text, lang, t_asr, t_start, speaker) from _trans_q,
-    #     translates with 1 retry on empty result, fires result_callback.
-    #     """
-    #     while True:
-    #         item = self._trans_q.get()
-    #         if item is None:
-    #             self._trans_q.task_done()
-    #             break
-    #         try:
-    #             if len(item) == 5:
-    #                 text, lang, t_asr, t_start, speaker = item
-    #             else:
-    #                 text, lang, t_asr, t_start = item
-    #                 speaker = self.current_speaker
-    #             t1 = time.time()
-
-    #             ###
-    #             clean_text_for_llm = re.sub(r'\[speaker\d+\]', '', text).strip()
-    #             clean_text_for_llm = re.sub(r'\s+', ' ', clean_text_for_llm)
-
-    #             translated = self._translate(clean_text_for_llm)
-
-    #             # Retry once on empty/garbage output
-    #             if not translated.strip():
-    #                 log(f"[trans_worker] Empty result, retrying: {clean_text_for_llm[:60]}")
-    #                 time.sleep(0.2)
-    #                 translated = self._translate(clean_text_for_llm)
-
-    #             t_llm  = time.time() - t1
-
-    #             total  = time.time() - t_start
-    #             self._emit_result(
-    #                 text,
-    #                 translated,
-    #                 lang,
-    #                 {
-    #                     "asr": round(t_asr, 2),
-    #                     "translate": round(t_llm, 2),
-    #                     "total": round(total, 2),
-    #                 },
-    #                 speaker=speaker,
-    #             )
-    #         except Exception as exc:
-    #             self._report_async_error("translation-worker", exc)
-    #         finally:
-    #             self._trans_q.task_done()
-
     def _trans_worker(self):
         """
         Dedicated LLM translation thread.
