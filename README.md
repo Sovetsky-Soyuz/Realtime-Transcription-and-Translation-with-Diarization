@@ -96,7 +96,7 @@ Create a `.env` file in this folder if you want to provide a Hugging Face token 
 ```env
 HF_TOKEN=your_huggingface_token_here
 MODEL=your_translate_model_here
-MAX_SPEAKERS=4
+MAX_SPEAKERS=number_of_speakers
 ```
 
 ## Usage
