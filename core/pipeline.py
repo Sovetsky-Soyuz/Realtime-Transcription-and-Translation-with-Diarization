@@ -198,24 +198,21 @@ class LocalPipeline:
 
     def _emit_result(
         self,
-        original: str,
-        translated: str,
+        original: list[str] | str,    
+        translated: list[str] | str,
         lang: str,
         timing: dict,
         speaker: str | None = None,
     ):
-        speaker_tag = self._current_speaker_tag(speaker)
 
-        # formatted_original = self._prefix_speaker_tag(original, speaker_tag)
-        # formatted_translated = translated.strip()
+        if isinstance(original, str):
+            original = [original.strip()]
+        if isinstance(translated, str):
+            translated = [translated.strip()]
 
-        formatted_original = original.strip()
-        formatted_translated = translated.strip()
+        formatted_original = "\n".join(original)
+        formatted_translated = "\n".join(translated)
 
-        if self.speaker_output_mode == "both" and formatted_translated:
-            formatted_translated = self._prefix_speaker_tag(
-                formatted_translated, speaker_tag
-            )
         self._result_cb(formatted_original, formatted_translated, lang, timing)
 
     def _queue_translation_request(
@@ -349,12 +346,24 @@ class LocalPipeline:
 
     def _get_speaker_at_time(self, t_abs: float) -> str:
         """Get the speaker tag at absolute time t_abs (seconds)"""
-        # Iterate from most recent to oldest
+        if not self.speaker_history:
+            return self._clean_spk(self.current_speaker or DEFAULT_SPEAKER)
+
+        best_spk = self.current_speaker
+        min_dist = float("inf")
+
         for start, end, spk in reversed(self.speaker_history):
-            if start - 0.8 <= t_abs <= end + 0.8: # Allow for Diart's latency buffer
+            if start <= t_abs <= end:
                 return self._clean_spk(spk)
-        
-        # If not found, use the current speaker as fallback
+            
+            dist = min(abs(t_abs - start), abs(t_abs - end))
+            if dist < min_dist:
+                min_dist = dist
+                best_spk = spk
+                
+        if min_dist < 1.5:
+            return self._clean_spk(best_spk)
+            
         return self._clean_spk(self.current_speaker or DEFAULT_SPEAKER)
 
 
@@ -485,6 +494,56 @@ class LocalPipeline:
 
         self._status(f"LLM loaded ({time.time() - t:.1f}s)")
 
+    # def _trans_worker(self):
+    #     """
+    #     Dedicated LLM translation thread.
+    #     Picks (text, lang, t_asr, t_start, speaker) from _trans_q,
+    #     translates with 1 retry on empty result, fires result_callback.
+    #     """
+    #     while True:
+    #         item = self._trans_q.get()
+    #         if item is None:
+    #             self._trans_q.task_done()
+    #             break
+    #         try:
+    #             if len(item) == 5:
+    #                 text, lang, t_asr, t_start, speaker = item
+    #             else:
+    #                 text, lang, t_asr, t_start = item
+    #                 speaker = self.current_speaker
+    #             t1 = time.time()
+
+    #             ###
+    #             clean_text_for_llm = re.sub(r'\[speaker\d+\]', '', text).strip()
+    #             clean_text_for_llm = re.sub(r'\s+', ' ', clean_text_for_llm)
+
+    #             translated = self._translate(clean_text_for_llm)
+
+    #             # Retry once on empty/garbage output
+    #             if not translated.strip():
+    #                 log(f"[trans_worker] Empty result, retrying: {clean_text_for_llm[:60]}")
+    #                 time.sleep(0.2)
+    #                 translated = self._translate(clean_text_for_llm)
+
+    #             t_llm  = time.time() - t1
+
+    #             total  = time.time() - t_start
+    #             self._emit_result(
+    #                 text,
+    #                 translated,
+    #                 lang,
+    #                 {
+    #                     "asr": round(t_asr, 2),
+    #                     "translate": round(t_llm, 2),
+    #                     "total": round(total, 2),
+    #                 },
+    #                 speaker=speaker,
+    #             )
+    #         except Exception as exc:
+    #             self._report_async_error("translation-worker", exc)
+    #         finally:
+    #             self._trans_q.task_done()
+
     def _trans_worker(self):
         """
         Dedicated LLM translation thread.
@@ -504,26 +563,63 @@ class LocalPipeline:
                     speaker = self.current_speaker
                 t1 = time.time()
 
-                translated = self._translate(text)
+                # --- 1. RESTORE ORIGINAL TEXT FORMAT ---
+                if not text.startswith("[speaker"):
+                    text = f"[{speaker}] {text}"
 
-                # Retry once on empty/garbage output
-                if not translated.strip():
-                    log(f"[trans_worker] Empty result, retrying: {text[:60]}")
-                    time.sleep(0.2)
-                    translated = self._translate(text)
+                formatted_text = re.sub(r'\s*(\[speaker\d+\])\s*', r'\n\1 ', text).strip()
+                
+                if not formatted_text.startswith("[speaker"):
+                    spk_tag = f"[{speaker}]"
+                    formatted_text = f"{spk_tag} {formatted_text}"
+
+                text = formatted_text
+
+                # --- 2. SEPARATE BY SPEAKER & TRANSLATED IN SECTIONS ---
+                # Separate text into arrays, retaining [speaker] tags
+                pattern = r'(\[speaker\d+\][^\n\[]+)'
+                matches = re.findall(pattern, formatted_text)
+                
+                original_lines = [m.strip() for m in matches if m.strip()] if matches else [formatted_text]
+                translated_lines = []
+                
+                for line in original_lines:
+                    match_spk = re.match(r'(\[speaker\d+\])\s*(.*)', line)
+                    if match_spk:
+                        current_tag = match_spk.group(1)
+                        content_to_translate = match_spk.group(2)
+                    else:
+                        current_tag = f"[{speaker}]"
+                        content_to_translate = line
+
+                    if not content_to_translate.strip():
+                        translated_lines.append(current_tag)
+                        continue
+
+                    trans = self._translate(content_to_translate)
+                    
+                    if not trans.strip():
+                        time.sleep(0.2)
+                        trans = self._translate(content_to_translate)
+                        
+                    if trans.strip():
+                        translated_lines.append(f"{current_tag} {trans.strip()}")
+                    else:
+                        translated_lines.append(f"{current_tag} [Translation Error]")
 
                 t_llm  = time.time() - t1
                 total  = time.time() - t_start
+                
                 self._emit_result(
-                    text,
-                    translated,
+                    original_lines,     
+                    translated_lines,   
                     lang,
                     {
                         "asr": round(t_asr, 2),
                         "translate": round(t_llm, 2),
                         "total": round(total, 2),
                     },
-                    speaker=speaker,
+                    speaker=speaker, 
                 )
             except Exception as exc:
                 self._report_async_error("translation-worker", exc)
@@ -554,10 +650,9 @@ class LocalPipeline:
 
         for segment in segments:
             for word in segment.words:
-                # word_mid = (word.start + word.end) / 2
+                
                 word_mid_abs = t_capture + (word.start + word.end) / 2.0
 
-                # spk = self._speaker_at(word_mid)
                 spk = self._get_speaker_at_time(word_mid_abs)
 
                 if spk != current_spk_in_sentence:
@@ -839,12 +934,15 @@ class LocalPipeline:
             return None
 
         capture_time = 0.0 if t_capture is None else float(t_capture)
+
         duration = samples.size / self.sample_rate
+
         speaker_snapshot = self._dominant_speaker_in_window(
             capture_time, capture_time + duration
         )
 
         wav_path = self._save_wav(pcm_bytes)
+
         try:
             t_start = time.time()
             full_text, lang = self._transcribe(wav_path, t_capture=capture_time)
@@ -865,7 +963,7 @@ class LocalPipeline:
             return None
 
         self._queue_translation_request(
-            deduped_text, lang, t_asr, t_start, speaker=speaker_snapshot
+            deduped_text, lang, t_asr, t_start, speaker=None
         )
         return deduped_text, lang
 

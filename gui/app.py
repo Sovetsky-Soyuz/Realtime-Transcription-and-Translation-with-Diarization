@@ -214,7 +214,7 @@ def run_gui(args):
 
         @staticmethod
         def _esc(t):
-            return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\n", "<br>")
 
         def _render(self):
             parts = []
@@ -1092,13 +1092,9 @@ def run_gui(args):
 
                             if new_part and len(new_part) >= MIN_COMMIT_CHARS:
 
-                                # spk_tag = last_speaker
-
-                                # full_text_spk = f"[{spk_tag}] {new_part}"
-
                                 full_text_spk = new_part.strip()
 
-                                # 1. LOCK THE ORIGINAL SENTENCE TO THE INTERFACE IMMEDIATELY (Do not wait for LLM)  
+                                # 1. LOCK THE ORIGINAL SENTENCE TO THE INTERFACE IMMEDIATELY 
                                 self.sig_original_commit.emit(full_text_spk)
 
                                 # Cancel pending draft — final is coming
@@ -1109,7 +1105,7 @@ def run_gui(args):
                                         break
                                 
                                 # 2. QUEUE THE TRANSLATION FOR LLM
-                                self._queue_translation(p, full_text_spk, now, None)
+                                self._queue_translation(p, full_text_spk, now, speaker=None)
 
                     # 3. RESET THE WHOLE MEMORY TO PREPARE FOR THE NEXT SENTENCE
                     buf = next_buf
