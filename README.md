@@ -206,14 +206,6 @@ You can customize the pipeline's behavior using the following command-line argum
 | `--device`        | Hardware device for inference. Choices:`cuda`, `cpu`.                                                                     | `cuda`                         |
 | `--compute-type`  | Whisper compute type. Choices:`float16`, `int8`, `float32`.                                                             | `float16`                      |
 
-### Pipeline Tuning (Advanced)
-
-| Argument             | Description                                             | Default |
-| :------------------- | :------------------------------------------------------ | :------ |
-| `--chunk-seconds`  | Chunk-length tuning value used by the shared pipeline.  | `7`   |
-| `--stride-seconds` | Stride-length tuning value used by the shared pipeline. | `5`   |
-
-*Tip: You can always run `python main.py --help` in your terminal to see this list dynamically.*
 
 ## WASAPI Loopback
 
